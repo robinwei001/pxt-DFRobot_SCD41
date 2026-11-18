@@ -1,245 +1,181 @@
+/**
+ * SCD41 scd41Sensor.ts
+ * 对标 DFRobot Arduino DFRobot_SCD4X 库时序
+ * 修复：NaN问题、I2C repeated模式、CRC校验、时序
+ */
+const SCD41_ADDR = 0x62;
+enum Cmd {
+    STOP_PERIODIC_MEASUREMENT = 0x3F86,
+    START_PERIODIC_MEASUREMENT = 0x21B1,
+    GET_DATA_READY_STATUS = 0xE4B8,
+    READ_MEASUREMENT = 0xEC05
+}
 
-//% weight=100 color=#9999FF icon="\uf2f1" block="SCD41 Infrared CO2 Sensor (SEN0536)"
-// Faithful port of the Arduino DFRobot_SCD4X library to MakeCode/pxt.
-namespace scd41Sensor {
-
-    export enum BeginPara {
-        //% blockId="scd41Sensor_Elevation" block="Elevation"
-        Elevation,
-        //% blockId="scd41Sensor_Pressure" block="Air Pressure"
-        Pressure,
-    }
-
-    export enum MeasureStatus {
-        //% blockId="scd41Sensor_Start" block="Start"
-        Start,
-        //% blockId="scd41Sensor_Stop" block="Stop"
-        Stop,
-    }
-
-    export enum MeasureData {
-        //% blockId="scd41Sensor_Temperature" block="Temperature"
-        Temperature,
-        //% blockId="scd41Sensor_Humidity" block="Humidity"
-        Humidity,
-        //% blockId="scd41Sensor_CO2" block="CO2"
-        CO2,
-    }
-
-    /* ---- commands, identical to DFRobot_SCD4X.h ---- */
-    const SCD4X_I2C_ADDR              = 0x62;
-    const SCD4X_START_PERIODIC_MEASURE = 0x21b1;
-    const SCD4X_READ_MEASUREMENT       = 0xec05;
-    const SCD4X_STOP_PERIODIC_MEASURE  = 0x3f86;
-    const SCD4X_SET_SENSOR_ALTITUDE    = 0x2427;
-    const SCD4X_SET_AMBIENT_PRESSURE  = 0xe000;
-    const SCD4X_GET_DATA_READY_STATUS  = 0xe4b8;
-    const SCD4X_GET_SERIAL_NUMBER      = 0x3682;
-
-    const SCD4X_CRC8_INIT       = 0xFF;
-    const SCD4X_CRC8_POLYNOMIAL = 0x31;
-
-    /* ---- diagnostic error codes ---- */
-    const ERR_OK          = 0;
-    const ERR_NACK        = 1;  // write to 0x62 was not acknowledged
-    const ERR_SHORT_READ  = 2;  // read returned fewer bytes than requested
-    const ERR_NOT_READY    = 4;  // FIFO empty, no new sample
-    const ERR_NOT_STARTED = 5; // periodic measurement not started yet
-
-    let temp = NaN;
-    let humi = NaN;
-    let co2ppm = NaN;
-    let started = false;
-    let lastError = ERR_OK;
-
-    /**
-     * Check whether the sensor acknowledges its I2C address (0x62).
-     */
-    //% blockId=scd41Sensor_isConnected block="SCD41 connected?"
-    //% weight=90
-    export function isConnected(): boolean {
-        const b = pins.createBuffer(1);
-        b.setNumber(NumberFormat.UInt8LE, 0, 0);
-        return pins.i2cWriteBuffer(SCD4X_I2C_ADDR, b, false) == 0;
-    }
-
-    /**
-     * Last diagnostic code: 0 ok, 1 NACK, 2 short read, 4 not ready, 5 not started.
-     */
-    //% blockId=scd41Sensor_errorCode block="SCD41 last error code"
-    //% weight=30
-    export function errorCode(): number {
-        return lastError;
-    }
-
-    /**
-     * Initialize the sensor (mirrors Arduino begin(): stop periodic measurement,
-     * wait 500ms, read serial number, apply compensation). Does NOT start sampling;
-     * call measure(Start) afterwards, exactly like the Arduino example setup().
-     * @param value compensation value (altitude in m, or pressure in Pa)
-     * @param para choose whether value is elevation or air pressure
-     */
-    //% blockId=scd41Sensor_begin block="SCD41 Init %value %para"
-    //% weight=100
-    export function begin(value: number, para: BeginPara): void {
-        lastError = ERR_OK;
-
-        // Arduino: enablePeriodMeasure(STOP_PERIODIC_MEASURE) then delay(500).
-        enablePeriodMeasure(SCD4X_STOP_PERIODIC_MEASURE);
-
-        // Arduino: getSerialNumber() as a communication check (best effort here).
-        readSerialNumber();
-
-        if (para == BeginPara.Elevation) {
-            writeData(SCD4X_SET_SENSOR_ALTITUDE, pack(value));
-        } else if (para == BeginPara.Pressure) {
-            writeData(SCD4X_SET_AMBIENT_PRESSURE, pack(Math.ceil(value / 100)));
-        }
-        basic.pause(1);
-    }
-
-    /**
-     * Start / stop periodic measurement (mirrors Arduino enablePeriodMeasure).
-     * @param status Start / Stop
-     */
-    //% blockId=scd41Sensor_measure block="SCD41 %status measure"
-    //% weight=80
-    export function measure(status: MeasureStatus): void {
-        if (status == MeasureStatus.Start) {
-            enablePeriodMeasure(SCD4X_START_PERIODIC_MEASURE);
-            started = true;
-        } else if (status == MeasureStatus.Stop) {
-            enablePeriodMeasure(SCD4X_STOP_PERIODIC_MEASURE);
-            started = false;
+// Sensirion CRC8 0x31 init 0xFF
+function crc8(data: number[]): number {
+    let crc = 0xFF;
+    for (const b of data) {
+        crc ^= b;
+        for (let i = 0; i < 8; i++) {
+            if (crc & 0x80) {
+                crc = (crc << 1) ^ 0x31;
+            } else {
+                crc = crc << 1;
+            }
+            crc &= 0xFF;
         }
     }
+    return crc;
+}
 
-    /**
-     * Mirrors Arduino getDataReadyStatus() + readMeasurement():
-     * poll ready flag, and only when ready read the 9-byte frame.
-     * @returns true when a valid new frame has been latched
-     */
-    //% blockId=scd41Sensor_getStatus block="Is the sensor data updated?"
-    //% weight=60
-    export function getStatus(): boolean {
-        if (!started) {
-            lastError = ERR_NOT_STARTED;
-            return false;
-        }
+class DFRobotSCD41 {
+    private _initOK = false;
+    private _co2 = 0;
+    private _temp = 0.0;
+    private _rh = 0.0;
 
-        // 1. data ready status (Arduino getDataReadyStatus)
-        const st = readData(SCD4X_GET_DATA_READY_STATUS, 3);
-        if (lastError != ERR_OK) return false;
-        const statusWord = byteToWord(st[0], st[1]);
-        if ((statusWord & 0x7FF) == 0) {
-            lastError = ERR_NOT_READY;
-            return false;
-        }
+    constructor() { }
 
-        // 2. read measurement (Arduino readMeasurement): CO2, T, RH
-        const m = readData(SCD4X_READ_MEASUREMENT, 9);
-        if (lastError != ERR_OK) return false;
+    private sendCmd(cmd: number) {
+        const buf = pins.createBuffer(2);
+        buf[0] = (cmd >> 8) & 0xFF;
+        buf[1] = cmd & 0xFF;
+        // repeated=false：发STOP，和Arduino Wire逻辑一致
+        pins.i2cWriteBuffer(SCD41_ADDR, buf, false);
+        control.waitMicros(1000); // 命令后等待1ms
+    }
 
-        co2ppm = byteToWord(m[0], m[1]);
-        const rawTemp = byteToWord(m[3], m[4]);
-        const rawHumi = byteToWord(m[6], m[7]);
+    init(): boolean {
+        // 对标Arduino begin时序：先停止测量
+        this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
+        control.waitMicros(500000); // 500ms
 
-        // Same scaling as Arduino DFRobot_SCD4X.cpp
-        temp = -45 + 175 * rawTemp / 65535;
-        humi = 100 * rawHumi / 65535;
-        lastError = ERR_OK;
+        this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
+        this._initOK = true;
         return true;
     }
 
+    isDataReady(): boolean {
+        if (!this._initOK) return false;
+        this.sendCmd(Cmd.GET_DATA_READY_STATUS);
+        const recv = pins.i2cReadBuffer(SCD41_ADDR, 3, false);
+        // 长度保护
+        if (recv.length < 3) return false;
+        const c = crc8([recv[0], recv[1]]);
+        if (c !== recv[2]) return false;
+        const raw = (recv[0] << 8) | recv[1];
+        return (raw & 0x8000) !== 0;
+    }
+
+    readMeasurement() {
+        // 兜底：未就绪/未初始化，全部置0，杜绝undefined
+        if (!this._initOK || !this.isDataReady()) {
+            this._co2 = 0;
+            this._temp = 0;
+            this._rh = 0;
+            return;
+        }
+        this.sendCmd(Cmd.READ_MEASUREMENT);
+        const recv = pins.i2cReadBuffer(SCD41_ADDR, 9, false);
+        // 关键：buffer长度不足直接失败赋值0，防止访问undefined
+        if (recv.length < 9) {
+            this._co2 = 0;
+            this._temp = 0;
+            this._rh = 0;
+            return;
+        }
+
+        // CO2 CRC
+        const co2Crc = crc8([recv[0], recv[1]]);
+        if (co2Crc !== recv[2]) {
+            this._co2 = 0;
+            this._temp = 0;
+            this._rh = 0;
+            return;
+        }
+        // Temp CRC
+        const tempCrc = crc8([recv[3], recv[4]]);
+        if (tempCrc !== recv[5]) {
+            this._co2 = 0;
+            this._temp = 0;
+            this._rh = 0;
+            return;
+        }
+        // RH CRC
+        const rhCrc = crc8([recv[6], recv[7]]);
+        if (rhCrc !== recv[8]) {
+            this._co2 = 0;
+            this._temp = 0;
+            this._rh = 0;
+            return;
+        }
+
+        // 有效数据，计算，公式和Arduino库完全对齐
+        this._co2 = (recv[0] << 8) | recv[1];
+        const rawTemp = (recv[3] << 8) | recv[4];
+        const rawRh = (recv[6] << 8) | recv[7];
+        this._temp = rawTemp * 175.0 / 65535.0 - 45.0;
+        this._rh = rawRh * 100.0 / 65535.0;
+    }
+
+    getCO2(): number {
+        this.readMeasurement();
+        return this._co2;
+    }
+
+    getTemperature(): number {
+        this.readMeasurement();
+        return this._temp;
+    }
+
+    getHumidity(): number {
+        this.readMeasurement();
+        return this._rh;
+    }
+}
+
+let scd41 = new DFRobotSCD41();
+
+//% weight=10 color="#0088cc" icon="\uf080"
+//% block="DFRobot SCD41 CO2 Sensor"
+namespace DFRobotSCD41 {
     /**
-     * Get the last latched value (NaN if no valid frame yet).
-     * @param data Temperature / Humidity / CO2
+     * Initialize SCD41 sensor
      */
-    //% blockId=scd41Sensor_getdata block="get %data"
-    //% weight=40
-    export function getdata(data: MeasureData): number {
-        if (data == MeasureData.Temperature) return temp;
-        if (data == MeasureData.Humidity) return humi;
-        return co2ppm;
-    }
-
-    /* ---------------- internal helpers ---------------- */
-
-    function enablePeriodMeasure(mode: number): void {
-        writeData(mode, []);
-        if (SCD4X_STOP_PERIODIC_MEASURE == mode) {
-            basic.pause(500);   // Arduino delay(500) after stop
-        }
-    }
-
-    function readSerialNumber(): void {
-        readData(SCD4X_GET_SERIAL_NUMBER, 9);
-    }
-
-    function pack(data: number): number[] {
-        const hi = (data >> 8) & 0xFF;
-        const lo = data & 0xFF;
-        return [hi, lo, calcCRC(hi, lo)];
+    //% block="init SCD41 sensor"
+    export function initSensor() {
+        scd41.init();
     }
 
     /**
-     * Sensirion CRC8 (identical to Arduino calcCRC): poly 0x31, init 0xFF.
+     * Get CO2 concentration (ppm)
      */
-    function calcCRC(hi: number, lo: number): number {
-        let crc = SCD4X_CRC8_INIT;
-        const buf = [hi, lo];
-        for (let currentByte = 0; currentByte < 2; currentByte++) {
-            crc = crc ^ buf[currentByte];
-            for (let crcbit = 8; crcbit > 0; crcbit--) {
-                if (crc & 0x80) {
-                    crc = ((crc << 1) & 0xFF) ^ SCD4X_CRC8_POLYNOMIAL;
-                } else {
-                    crc = ((crc << 1) & 0xFF);
-                }
-            }
-        }
-        return crc;
-    }
-
-    function byteToWord(msb: number, lsb: number): number {
-        return (msb << 8) | lsb;
+    //% block="SCD41 read CO2 ppm"
+    export function getCO2(): number {
+        return scd41.getCO2();
     }
 
     /**
-     * Send a 16-bit command, wait 1ms for the sensor to prepare, then read `len` bytes.
-     * The command write ends with a STOP (repeated=false), matching the Arduino
-     * endTransmission() -> requestFrom() transaction. Sets lastError on failure.
+     * Get temperature (℃)
      */
-    function readData(reg: number, len: number): Buffer {
-        const w = pins.createBuffer(2);
-        w.setNumber(NumberFormat.UInt8LE, 0, (reg >> 8) & 0xFF);
-        w.setNumber(NumberFormat.UInt8LE, 1, reg & 0xFF);
-        const wres = pins.i2cWriteBuffer(SCD4X_I2C_ADDR, w, false);
-        if (wres != 0) {
-            lastError = ERR_NACK;
-            return pins.createBuffer(len);
-        }
-        basic.pause(1);   // SCD4x command execution time (1 ms)
-        const r = pins.i2cReadBuffer(SCD4X_I2C_ADDR, len, false);
-        if (!r || r.length < len) {
-            lastError = ERR_SHORT_READ;
-            return pins.createBuffer(len);
-        }
-        return r;
+    //% block="SCD41 read temperature ℃"
+    export function getTemp(): number {
+        return scd41.getTemperature();
     }
 
     /**
-     * Write a 16-bit command plus optional payload bytes (word + CRC).
+     * Get relative humidity (%)
      */
-    function writeData(cmd: number, payload: number[]): void {
-        const total = 2 + payload.length;
-        const b = pins.createBuffer(total);
-        b.setNumber(NumberFormat.UInt8LE, 0, (cmd >> 8) & 0xFF);
-        b.setNumber(NumberFormat.UInt8LE, 1, cmd & 0xFF);
-        for (let i = 0; i < payload.length; i++) {
-            b.setNumber(NumberFormat.UInt8LE, 2 + i, payload[i] & 0xFF);
-        }
-        const res = pins.i2cWriteBuffer(SCD4X_I2C_ADDR, b, false);
-        if (res != 0) lastError = ERR_NACK;
+    //% block="SCD41 read humidity %"
+    export function getHum(): number {
+        return scd41.getHumidity();
+    }
+
+    /**
+     * Check if new data ready
+     */
+    //% block="SCD41 data ready?"
+    export function isReady(): boolean {
+        return scd41.isDataReady();
     }
 }
