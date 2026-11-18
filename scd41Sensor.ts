@@ -1,8 +1,7 @@
 /**
  * scd41Sensor.ts
- * ✅ 无新增积木！积木和原版完全一样
- * ✅ 内部自动缓存，get系列不再触发I2C，解决I2C风暴卡死
- * ✅ 对齐Arduino时序，异常返回0，无NaN
+ * 增加I2C重试 + 看门狗自动复位，兼容原有全部积木
+ * 解决：查询几次后I2C卡死不再刷新
  */
 const SCD41_ADDR = 0x62;
 enum Cmd {
@@ -33,17 +32,24 @@ class DFRobotSCD41 {
     private _co2 = 0;
     private _temp = 0.0;
     private _rh = 0.0;
-    // 标记：本轮就绪数据是否已经读取并缓存
     private _dataFetched = false;
+    private _noDataCount = 0;
+    // 连续10次查不到就绪，自动复位传感器
+    private readonly WATCHDOG_MAX = 10;
 
     constructor() { }
 
-    private sendCmd(cmd: number) {
+    private sendCmd(cmd: number): boolean {
         const buf = pins.createBuffer(2);
         buf[0] = (cmd >> 8) & 0xFF;
         buf[1] = cmd & 0xFF;
-        pins.i2cWriteBuffer(SCD41_ADDR, buf, false);
-        control.waitMicros(1000);
+        try {
+            pins.i2cWriteBuffer(SCD41_ADDR, buf, false);
+            control.waitMicros(1000);
+            return true;
+        } catch (e) {
+            return false;
+        }
     }
 
     init(): boolean {
@@ -52,26 +58,51 @@ class DFRobotSCD41 {
         this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
         this._initOK = true;
         this._dataFetched = false;
+        this._noDataCount = 0;
         return true;
     }
 
+    // 带重试的就绪查询
     isDataReady(): boolean {
         if (!this._initOK) return false;
-        this.sendCmd(Cmd.GET_DATA_READY_STATUS);
-        const recv = pins.i2cReadBuffer(SCD41_ADDR, 3, false);
-        if (recv.length < 3) return false;
-        const c = crc8([recv[0], recv[1]]);
-        if (c !== recv[2]) return false;
-        const raw = (recv[0] << 8) | recv[1];
-        const ready = (raw & 0x8000) !== 0;
-        // 新数据就绪，重置读取标记，允许读取一次
+
+        let ready = false;
+        // 最多重试2次
+        for (let retry = 0; retry < 3; retry++) {
+            this.sendCmd(Cmd.GET_DATA_READY_STATUS);
+            const recv = pins.i2cReadBuffer(SCD41_ADDR, 3, false);
+            if (recv.length >= 3) {
+                const c = crc8([recv[0], recv[1]]);
+                if (c === recv[2]) {
+                    const raw = (recv[0] << 8) | recv[1];
+                    ready = (raw & 0x8000) !== 0;
+                    break;
+                }
+            }
+            control.waitMicros(500);
+        }
+
         if (ready) {
             this._dataFetched = false;
+            this._noDataCount = 0;
+        } else {
+            this._noDataCount += 1;
+            // 看门狗：长期无数据，自动重启测量
+            if (this._noDataCount >= this.WATCHDOG_MAX) {
+                this.resetSensor();
+                this._noDataCount = 0;
+            }
         }
         return ready;
     }
 
-    // 仅在就绪且未读取过时，读取一次刷新缓存
+    private resetSensor() {
+        this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
+        control.waitMicros(500000);
+        this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
+        this._dataFetched = false;
+    }
+
     private tryReadOnce() {
         if (!this._initOK || this._dataFetched) {
             return;
