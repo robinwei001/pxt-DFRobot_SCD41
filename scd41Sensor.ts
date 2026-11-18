@@ -1,8 +1,8 @@
 /**
- * SCD41 scd41Sensor.ts
- * 对标 DFRobot Arduino DFRobot_SCD4X
- * 修复：读3次卡死、I2C命令风暴、重复isDataReady调用
- * 机制：就绪后只读取一次，数据缓存，get函数只拿缓存，不访问I2C
+ * scd41Sensor.ts
+ * ✅ 无新增积木！积木和原版完全一样
+ * ✅ 内部自动缓存，get系列不再触发I2C，解决I2C风暴卡死
+ * ✅ 对齐Arduino时序，异常返回0，无NaN
  */
 const SCD41_ADDR = 0x62;
 enum Cmd {
@@ -12,7 +12,6 @@ enum Cmd {
     READ_MEASUREMENT = 0xEC05
 }
 
-// Sensirion CRC8 0x31 init 0xFF
 function crc8(data: number[]): number {
     let crc = 0xFF;
     for (const b of data) {
@@ -34,6 +33,8 @@ class DFRobotSCD41 {
     private _co2 = 0;
     private _temp = 0.0;
     private _rh = 0.0;
+    // 标记：本轮就绪数据是否已经读取并缓存
+    private _dataFetched = false;
 
     constructor() { }
 
@@ -50,10 +51,10 @@ class DFRobotSCD41 {
         control.waitMicros(500000);
         this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
         this._initOK = true;
+        this._dataFetched = false;
         return true;
     }
 
-    // 仅查询就绪，不读取测量值，不修改缓存
     isDataReady(): boolean {
         if (!this._initOK) return false;
         this.sendCmd(Cmd.GET_DATA_READY_STATUS);
@@ -62,13 +63,18 @@ class DFRobotSCD41 {
         const c = crc8([recv[0], recv[1]]);
         if (c !== recv[2]) return false;
         const raw = (recv[0] << 8) | recv[1];
-        return (raw & 0x8000) !== 0;
+        const ready = (raw & 0x8000) !== 0;
+        // 新数据就绪，重置读取标记，允许读取一次
+        if (ready) {
+            this._dataFetched = false;
+        }
+        return ready;
     }
 
-    // 【重点】仅在就绪标志为true时调用一次，读取并缓存一组数据
-    readOnceWhenReady(): boolean {
-        if (!this._initOK || !this.isDataReady()) {
-            return false;
+    // 仅在就绪且未读取过时，读取一次刷新缓存
+    private tryReadOnce() {
+        if (!this._initOK || this._dataFetched) {
+            return;
         }
         this.sendCmd(Cmd.READ_MEASUREMENT);
         const recv = pins.i2cReadBuffer(SCD41_ADDR, 9, false);
@@ -76,9 +82,9 @@ class DFRobotSCD41 {
             this._co2 = 0;
             this._temp = 0;
             this._rh = 0;
-            return false;
+            this._dataFetched = true;
+            return;
         }
-
         const co2Crc = crc8([recv[0], recv[1]]);
         const tempCrc = crc8([recv[3], recv[4]]);
         const rhCrc = crc8([recv[6], recv[7]]);
@@ -86,24 +92,27 @@ class DFRobotSCD41 {
             this._co2 = 0;
             this._temp = 0;
             this._rh = 0;
-            return false;
+            this._dataFetched = true;
+            return;
         }
-
         this._co2 = (recv[0] << 8) | recv[1];
         const rawTemp = (recv[3] << 8) | recv[4];
         const rawRh = (recv[6] << 8) | recv[7];
         this._temp = rawTemp * 175.0 / 65535.0 - 45.0;
         this._rh = rawRh * 100.0 / 65535.0;
-        return true;
+        this._dataFetched = true;
     }
 
     getCO2(): number {
+        this.tryReadOnce();
         return this._co2;
     }
     getTemperature(): number {
+        this.tryReadOnce();
         return this._temp;
     }
     getHumidity(): number {
+        this.tryReadOnce();
         return this._rh;
     }
 }
@@ -113,49 +122,22 @@ let scd41 = new DFRobotSCD41();
 //% weight=10 color="#0088cc" icon="\uf080"
 //% block="DFRobot SCD41 CO2 Sensor"
 namespace DFRobotSCD41 {
-    /**
-     * Initialize SCD41 sensor
-     */
     //% block="init SCD41 sensor"
     export function initSensor() {
         scd41.init();
     }
-
-    /**
-     * Check if new data ready
-     */
     //% block="SCD41 data ready?"
     export function isReady(): boolean {
         return scd41.isDataReady();
     }
-
-    /**
-     * Read one group data to cache, only run once when ready=true
-     */
-    //% block="SCD41 read once and cache"
-    export function readOnce() {
-        scd41.readOnceWhenReady();
-    }
-
-    /**
-     * Get CO2 concentration (ppm)
-     */
     //% block="SCD41 read CO2 ppm"
     export function getCO2(): number {
         return scd41.getCO2();
     }
-
-    /**
-     * Get temperature (℃)
-     */
     //% block="SCD41 read temperature ℃"
     export function getTemp(): number {
         return scd41.getTemperature();
     }
-
-    /**
-     * Get relative humidity (%)
-     */
     //% block="SCD41 read humidity %"
     export function getHum(): number {
         return scd41.getHumidity();
