@@ -1,5 +1,6 @@
 
 //% weight=100 color=#9999FF icon="\uf2f1" block="SCD41 Infrared CO2 Sensor (SEN0536)"
+// Faithful port of the Arduino DFRobot_SCD4X library to MakeCode/pxt.
 namespace scd41Sensor {
 
     export enum BeginPara {
@@ -25,160 +26,176 @@ namespace scd41Sensor {
         CO2,
     }
 
-
+    /* ---- commands, identical to DFRobot_SCD4X.h ---- */
     const SCD4X_I2C_ADDR              = 0x62;
+    const SCD4X_START_PERIODIC_MEASURE = 0x21b1;
+    const SCD4X_READ_MEASUREMENT       = 0xec05;
+    const SCD4X_STOP_PERIODIC_MEASURE  = 0x3f86;
+    const SCD4X_SET_SENSOR_ALTITUDE    = 0x2427;
+    const SCD4X_SET_AMBIENT_PRESSURE  = 0xe000;
+    const SCD4X_GET_DATA_READY_STATUS  = 0xe4b8;
+    const SCD4X_GET_SERIAL_NUMBER      = 0x3682;
 
-    const SCD4X_SERIAL_NUMBER_WORD0   = 0xbe02   ///< SCD4X serial number 0
-    const SCD4X_SERIAL_NUMBER_WORD1   = 0x7f07   ///< SCD4X serial number 1
-    const SCD4X_SERIAL_NUMBER_WORD2   = 0x3bfb   ///< SCD4X serial number 2
+    const SCD4X_CRC8_INIT       = 0xFF;
+    const SCD4X_CRC8_POLYNOMIAL = 0x31;
 
-    const SCD4X_CRC8_INIT             = 0xFF
-    const SCD4X_CRC8_POLYNOMIAL       = 0x31
+    /* ---- diagnostic error codes ---- */
+    const ERR_OK          = 0;
+    const ERR_NACK        = 1;  // write to 0x62 was not acknowledged
+    const ERR_SHORT_READ  = 2;  // read returned fewer bytes than requested
+    const ERR_NOT_READY    = 4;  // FIFO empty, no new sample
+    const ERR_NOT_STARTED = 5; // periodic measurement not started yet
 
-    /* SCD4X Basic Commands */
-    const SCD4X_START_PERIODIC_MEASURE    = 0x21b1   ///< start periodic measurement, signal update interval is 5 seconds.
-    const SCD4X_READ_MEASUREMENT          = 0xec05   ///< read measurement
-    const SCD4X_STOP_PERIODIC_MEASURE     = 0x3f86   ///< stop periodic measurement command
+    let temp = NaN;
+    let humi = NaN;
+    let co2ppm = NaN;
+    let started = false;
+    let lastError = ERR_OK;
 
-    /* SCD4X On-chip output signal compensation */
-    const SCD4X_SET_TEMPERATURE_OFFSET    = 0x241d   ///< set temperature offset
-    const SCD4X_GET_TEMPERATURE_OFFSET    = 0x2318   ///< get temperature offset
-    const SCD4X_SET_SENSOR_ALTITUDE       = 0x2427   ///< set sensor altitude
-    const SCD4X_GET_SENSOR_ALTITUDE       = 0x2322   ///< get sensor altitude
-    const SCD4X_SET_AMBIENT_PRESSURE      = 0xe000   ///< set ambient pressure
-
-    /* SCD4X Field calibration */
-    const SCD4X_PERFORM_FORCED_RECALIB    = 0x362f   ///< perform forced recalibration
-    const SCD4X_SET_AUTOMATIC_CALIB       = 0x2416   ///< set automatic self calibration enabled
-    const SCD4X_GET_AUTOMATIC_CALIB       = 0x2313   ///< get automatic self calibration enabled
-
-    /* SCD4X Low power */
-    const SCD4X_START_LOW_POWER_MEASURE   = 0x21ac   ///< start low power periodic measurement, signal update interval is approximately 30 seconds.
-    const SCD4X_GET_DATA_READY_STATUS     = 0xe4b8   ///< get data ready status
-
-    /* SCD4X Advanced features */
-    const SCD4X_PERSIST_SETTINGS          = 0x3615   ///< persist settings
-    const SCD4X_GET_SERIAL_NUMBER         = 0x3682   ///< get serial number
-    const SCD4X_PERFORM_SELF_TEST         = 0x3639   ///< perform self test
-    const SCD4X_PERFORM_FACTORY_RESET     = 0x3632   ///< perform factory reset
-    const SCD4X_REINIT                    = 0x3646   ///< reinit
-
-    /* SCD4X Low power single shot */
-    const SCD4X_MEASURE_SINGLE_SHOT            = 0x219d   ///< measure single shot
-    const SCD4X_MEASURE_SINGLE_SHOT_RHT_ONLY   = 0x2196   ///< measure single shot rht only
-    const SCD4X_POWER_DOWN                     = 0x36e0   ///< Put the sensor from idle to sleep to reduce current consumption.
-    const SCD4X_WAKE_UP                        = 0x36f6   ///< Wake up the sensor from sleep mode into idle mode.
-
-    let temp = 0;
-    let humi = 0;
-    let co2ppm = 0;
-    
     /**
-     * @param value , eg: "540"
+     * Check whether the sensor acknowledges its I2C address (0x62).
      */
-
-    //% blockId=scd41Sensor_begin block="SCD41 Init %value %para"
-    //% weight=100
-    export function begin(value: number, para: BeginPara): void {
-        enablePeriodMeasure(SCD4X_STOP_PERIODIC_MEASURE);
-        getSerialNumber();
-        // serial.writeLine("begin ok!");
-        if (para == BeginPara.Elevation) {
-            writeData(SCD4X_SET_SENSOR_ALTITUDE, pack(value), true);
-        } else if (para == BeginPara.Pressure) {
-            writeData(SCD4X_SET_AMBIENT_PRESSURE, pack(Math.ceil(value / 100)), true);
-        }
+    //% blockId=scd41Sensor_isConnected block="SCD41 connected?"
+    //% weight=90
+    export function isConnected(): boolean {
+        const b = pins.createBuffer(1);
+        b.setNumber(NumberFormat.UInt8LE, 0, 0);
+        return pins.i2cWriteBuffer(SCD4X_I2C_ADDR, b, false) == 0;
     }
 
     /**
-     * 
+     * Last diagnostic code: 0 ok, 1 NACK, 2 short read, 4 not ready, 5 not started.
      */
+    //% blockId=scd41Sensor_errorCode block="SCD41 last error code"
+    //% weight=30
+    export function errorCode(): number {
+        return lastError;
+    }
 
+    /**
+     * Initialize the sensor (mirrors Arduino begin(): stop periodic measurement,
+     * wait 500ms, read serial number, apply compensation). Does NOT start sampling;
+     * call measure(Start) afterwards, exactly like the Arduino example setup().
+     * @param value compensation value (altitude in m, or pressure in Pa)
+     * @param para choose whether value is elevation or air pressure
+     */
+    //% blockId=scd41Sensor_begin block="SCD41 Init %value %para"
+    //% weight=100
+    export function begin(value: number, para: BeginPara): void {
+        lastError = ERR_OK;
+
+        // Arduino: enablePeriodMeasure(STOP_PERIODIC_MEASURE) then delay(500).
+        enablePeriodMeasure(SCD4X_STOP_PERIODIC_MEASURE);
+
+        // Arduino: getSerialNumber() as a communication check (best effort here).
+        readSerialNumber();
+
+        if (para == BeginPara.Elevation) {
+            writeData(SCD4X_SET_SENSOR_ALTITUDE, pack(value));
+        } else if (para == BeginPara.Pressure) {
+            writeData(SCD4X_SET_AMBIENT_PRESSURE, pack(Math.ceil(value / 100)));
+        }
+        basic.pause(1);
+    }
+
+    /**
+     * Start / stop periodic measurement (mirrors Arduino enablePeriodMeasure).
+     * @param status Start / Stop
+     */
     //% blockId=scd41Sensor_measure block="SCD41 %status measure"
     //% weight=80
     export function measure(status: MeasureStatus): void {
         if (status == MeasureStatus.Start) {
             enablePeriodMeasure(SCD4X_START_PERIODIC_MEASURE);
+            started = true;
         } else if (status == MeasureStatus.Stop) {
             enablePeriodMeasure(SCD4X_STOP_PERIODIC_MEASURE);
+            started = false;
         }
     }
 
     /**
-     * 
+     * Mirrors Arduino getDataReadyStatus() + readMeasurement():
+     * poll ready flag, and only when ready read the 9-byte frame.
+     * @returns true when a valid new frame has been latched
      */
-
     //% blockId=scd41Sensor_getStatus block="Is the sensor data updated?"
     //% weight=60
     export function getStatus(): boolean {
-        
-        let buf = readData(SCD4X_GET_DATA_READY_STATUS, 3);
-        if (0x0000 == (byteToWord(buf[0], buf[1]) & 0x7FF)) {
+        if (!started) {
+            lastError = ERR_NOT_STARTED;
             return false;
         }
-        buf = readData(SCD4X_READ_MEASUREMENT, 9);
-        // serial.writeLine("len:"+buf.length);
-        // for(let i=0; i<buf.length; i++)
-        //     serial.writeLine("buf["+i+"]:" + buf[i]);
-        co2ppm = byteToWord(buf[0], buf[1]);
-        temp = -45 + Math.round(100 * 175 * ((byteToWord(buf[3], buf[4])) / (1 << 16))) / 100;
-        humi = Math.round(100 * 100 * ((byteToWord(buf[6], buf[7])) / (1 << 16))) /100;
+
+        // 1. data ready status (Arduino getDataReadyStatus)
+        const st = readData(SCD4X_GET_DATA_READY_STATUS, 3);
+        if (lastError != ERR_OK) return false;
+        const statusWord = byteToWord(st[0], st[1]);
+        if ((statusWord & 0x7FF) == 0) {
+            lastError = ERR_NOT_READY;
+            return false;
+        }
+
+        // 2. read measurement (Arduino readMeasurement): CO2, T, RH
+        const m = readData(SCD4X_READ_MEASUREMENT, 9);
+        if (lastError != ERR_OK) return false;
+
+        co2ppm = byteToWord(m[0], m[1]);
+        const rawTemp = byteToWord(m[3], m[4]);
+        const rawHumi = byteToWord(m[6], m[7]);
+
+        // Same scaling as Arduino DFRobot_SCD4X.cpp
+        temp = -45 + 175 * rawTemp / 65535;
+        humi = 100 * rawHumi / 65535;
+        lastError = ERR_OK;
         return true;
     }
 
     /**
-     * 
+     * Get the last latched value (NaN if no valid frame yet).
+     * @param data Temperature / Humidity / CO2
      */
-
     //% blockId=scd41Sensor_getdata block="get %data"
     //% weight=40
     export function getdata(data: MeasureData): number {
-        if (data == MeasureData.Temperature) {
-            return temp;
-        } else if (data == MeasureData.Humidity) {
-            return humi;
-        } else {
-            return co2ppm;
+        if (data == MeasureData.Temperature) return temp;
+        if (data == MeasureData.Humidity) return humi;
+        return co2ppm;
+    }
+
+    /* ---------------- internal helpers ---------------- */
+
+    function enablePeriodMeasure(mode: number): void {
+        writeData(mode, []);
+        if (SCD4X_STOP_PERIODIC_MEASURE == mode) {
+            basic.pause(500);   // Arduino delay(500) after stop
         }
     }
 
-    function enablePeriodMeasure(mode: number) {
-        writeData(mode, null, true);
-        if (SCD4X_STOP_PERIODIC_MEASURE == mode) {
-            basic.pause(500);                   // Give it some time to switch mode
-        }  
+    function readSerialNumber(): void {
+        readData(SCD4X_GET_SERIAL_NUMBER, 9);
     }
 
-    function getSerialNumber(): number[] {
-        let wordBuf: number[] = [];
-        let buf = readData(SCD4X_GET_SERIAL_NUMBER, 9);
-        wordBuf.push(byteToWord(buf[0], buf[1]));
-        wordBuf.push(byteToWord(buf[3], buf[4]));
-        wordBuf.push(byteToWord(buf[6], buf[7]));
-        return wordBuf;
+    function pack(data: number): number[] {
+        const hi = (data >> 8) & 0xFF;
+        const lo = data & 0xFF;
+        return [hi, lo, calcCRC(hi, lo)];
     }
 
-    function pack(data: number): number[]{
-        let sendPack: number[] = [];
-        sendPack.push((data >> 8) & 0xFF);
-        sendPack.push(data & 0xFF);
-        sendPack.push(calcCRC(data));
-        // serial.writeLine("-->" + calcCRC(data));
-        return sendPack;
-    }
-
-    function calcCRC(data: number): number {
-        let currentByte;
-        let crcbit;
+    /**
+     * Sensirion CRC8 (identical to Arduino calcCRC): poly 0x31, init 0xFF.
+     */
+    function calcCRC(hi: number, lo: number): number {
         let crc = SCD4X_CRC8_INIT;
-        let buf = [(data >> 8) & 0xFF, data & 0xFF];
-        for (currentByte = 0; currentByte < 2; currentByte++) {
+        const buf = [hi, lo];
+        for (let currentByte = 0; currentByte < 2; currentByte++) {
             crc = crc ^ buf[currentByte];
-            for (crcbit = 8; crcbit > 0; crcbit--) {
-                if (crc & 0x80)
+            for (let crcbit = 8; crcbit > 0; crcbit--) {
+                if (crc & 0x80) {
                     crc = ((crc << 1) & 0xFF) ^ SCD4X_CRC8_POLYNOMIAL;
-                else
+                } else {
                     crc = ((crc << 1) & 0xFF);
+                }
             }
         }
         return crc;
@@ -188,27 +205,41 @@ namespace scd41Sensor {
         return (msb << 8) | lsb;
     }
 
-    function readData(reg: number, len: number): Buffer{
-        // pins.i2cWriteNumber(SCD4X_I2C_ADDR, reg, NumberFormat.UInt8BE, true);
-        pins.i2cWriteBuffer(SCD4X_I2C_ADDR, pins.createBufferFromArray([(reg >> 8) & 0xFF, reg & 0xFF]), true);
-        return pins.i2cReadBuffer(SCD4X_I2C_ADDR, len, false);
+    /**
+     * Send a 16-bit command, wait 1ms for the sensor to prepare, then read `len` bytes.
+     * The command write ends with a STOP (repeated=false), matching the Arduino
+     * endTransmission() -> requestFrom() transaction. Sets lastError on failure.
+     */
+    function readData(reg: number, len: number): Buffer {
+        const w = pins.createBuffer(2);
+        w.setNumber(NumberFormat.UInt8LE, 0, (reg >> 8) & 0xFF);
+        w.setNumber(NumberFormat.UInt8LE, 1, reg & 0xFF);
+        const wres = pins.i2cWriteBuffer(SCD4X_I2C_ADDR, w, false);
+        if (wres != 0) {
+            lastError = ERR_NACK;
+            return pins.createBuffer(len);
+        }
+        basic.pause(1);   // SCD4x command execution time (1 ms)
+        const r = pins.i2cReadBuffer(SCD4X_I2C_ADDR, len, false);
+        if (!r || r.length < len) {
+            lastError = ERR_SHORT_READ;
+            return pins.createBuffer(len);
+        }
+        return r;
     }
 
-    
-    function writeData(cmd: number, buf: number[] = null, flag: boolean = false): void { 
-        //flag: false (cmd is byte eg: 0xff)  
-        //flag: ture (cmd is bytes eg: 0xffff)
-        let cmdArray: number[] = [];
-        if (flag){
-            cmdArray.push((cmd >> 8) & 0xFF);
-            cmdArray.push(cmd & 0xFF);
-        } else {
-            cmdArray.push(cmd);
+    /**
+     * Write a 16-bit command plus optional payload bytes (word + CRC).
+     */
+    function writeData(cmd: number, payload: number[]): void {
+        const total = 2 + payload.length;
+        const b = pins.createBuffer(total);
+        b.setNumber(NumberFormat.UInt8LE, 0, (cmd >> 8) & 0xFF);
+        b.setNumber(NumberFormat.UInt8LE, 1, cmd & 0xFF);
+        for (let i = 0; i < payload.length; i++) {
+            b.setNumber(NumberFormat.UInt8LE, 2 + i, payload[i] & 0xFF);
         }
-        if (buf == null || buf.length == 0) {
-            pins.i2cWriteBuffer(SCD4X_I2C_ADDR, pins.createBufferFromArray(cmdArray));
-        } else {
-            pins.i2cWriteBuffer(SCD4X_I2C_ADDR, pins.createBufferFromArray(cmdArray.concat(buf)));
-        }  
+        const res = pins.i2cWriteBuffer(SCD4X_I2C_ADDR, b, false);
+        if (res != 0) lastError = ERR_NACK;
     }
 }
