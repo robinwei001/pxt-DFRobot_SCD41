@@ -2,6 +2,7 @@
  * scd41Sensor.ts
  * 原有功能：I2C重试、看门狗自动复位、CO2/温湿度读取、就绪检测
  * 新增功能：软件复位、启动/停止周期测量、设置ASC自动校准、FRC强制校准
+ * 图形块显示文本改为中文，内部逻辑完全不变
  */
 const SCD41_ADDR = 0x62;
 
@@ -209,51 +210,51 @@ class DFRobotSCD41 {
 let scd41 = new DFRobotSCD41();
 
 //% weight=10 color="#0088cc" icon="\uf080"
-//% block="DFRobot SCD41 CO2 Sensor"
+//% block="DFRobot SCD41 二氧化碳传感器"
 namespace DFRobotSCD41 {
-    //===== 原有保留积木，完全不变 =====
-    //% block="init SCD41 sensor"
+    //===== 原有积木，仅修改显示文字为中文 =====
+    //% block="初始化 SCD41 传感器"
     export function initSensor() {
         scd41.init();
     }
-    //% block="SCD41 data ready?"
+    //% block="SCD41 是否数据就绪？"
     export function isReady(): boolean {
         return scd41.isDataReady();
     }
-    //% block="SCD41 read CO2 ppm"
+    //% block="读取二氧化碳 ppm"
     export function getCO2(): number {
         return scd41.getCO2();
     }
-    //% block="SCD41 read temperature ℃"
+    //% block="读取温度 ℃"
     export function getTemp(): number {
         return scd41.getTemperature();
     }
-    //% block="SCD41 read humidity %"
+    //% block="读取湿度 %RH"
     export function getHum(): number {
         return scd41.getHumidity();
     }
 
-    //===== 新增图形积木 =====
-    //% block="SCD41 software soft‑reset"
+    //===== 新增中文图形积木 =====
+    //% block="SCD41 软件复位"
     export function softReset() {
         scd41.softReset();
     }
-    //% block="SCD41 stop periodic measurement"
+    //% block="SCD41 停止周期测量"
     export function stopPeriodicMeasure() {
         scd41.stopPeriodic();
     }
-    //% block="SCD41 start periodic measurement"
+    //% block="SCD41 启动周期测量"
     export function startPeriodicMeasure() {
         scd41.startPeriodic();
     }
-    //% block="SCD41 set ASC auto‑calibration %enable"
+    //% block="SCD41 设置ASC自动校准 %enable"
     export function setASC(enable: boolean) {
         scd41.setASC(enable);
     }
     /**
      * FRC强制校准，传入参考CO₂ ppm，返回修正偏移量，失败0xFFFF
      */
-    //% block="SCD41 FRC forced recalibration ref ppm %refPpm"
+    //% block="SCD41 FRC强制校准 参考ppm %refPpm"
     export function frcCal(refPpm: number): number {
         return scd41.forcedRecalibration(refPpm);
     }
