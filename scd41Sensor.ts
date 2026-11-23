@@ -3,8 +3,13 @@
  * 原有功能：I2C重试、看门狗自动复位、CO2/温湿度读取、就绪检测
  * 新增功能：软件复位、普通(5s)/低功耗(30s)周期切换、设置ASC自动校准、FRC强制校准
  * 改良：看门狗复位自动恢复故障前的周期模式；loc_block中文本地化
+ * 修复：移除顶层enum，解决makecode无限转圈加载
  */
 const SCD41_ADDR = 0x62;
+// 不用enum，直接常量
+const MODE_IDLE = 0;
+const MODE_NORMAL_5S = 1;
+const MODE_LOWPOWER_30S = 2;
 
 enum Cmd {
     STOP_PERIODIC_MEASUREMENT = 0x3F86,
@@ -15,13 +20,6 @@ enum Cmd {
     SOFT_RESET = 0x3646,
     SET_AUTOMATIC_SELF_CALIBRATION = 0x2415,
     FORCED_RECALIBRATION = 0x362F
-}
-
-// 周期模式枚举，用于记录当前运行模式
-enum PeriodMode {
-    IDLE = 0,
-    NORMAL_5S = 1,
-    LOWPOWER_30S = 2
 }
 
 function crc8(data: number[]): number {
@@ -48,8 +46,8 @@ class DFRobotSCD41 {
     private _dataFetched = false;
     private _noDataCount = 0;
     private readonly WATCHDOG_MAX = 10;
-    // 新增：记录当前周期模式
-    private _currentMode: PeriodMode = PeriodMode.IDLE;
+    // 记录当前周期模式，改用数字常量
+    private _currentMode: number = MODE_IDLE;
 
     constructor() { }
 
@@ -85,7 +83,7 @@ class DFRobotSCD41 {
         this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
         this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
-        this._currentMode = PeriodMode.NORMAL_5S;
+        this._currentMode = MODE_NORMAL_5S;
         this._initOK = true;
         this._dataFetched = false;
         this._noDataCount = 0;
@@ -121,20 +119,18 @@ class DFRobotSCD41 {
         return ready;
     }
 
-    // 改良看门狗复位：根据 _currentMode 恢复对应周期模式
+    // 看门狗复位：根据 _currentMode 恢复对应周期模式
     private resetSensor() {
         this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
-        // 根据记录的模式恢复
         switch (this._currentMode) {
-            case PeriodMode.NORMAL_5S:
+            case MODE_NORMAL_5S:
                 this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
                 break;
-            case PeriodMode.LOWPOWER_30S:
+            case MODE_LOWPOWER_30S:
                 this.sendCmd(Cmd.START_LOW_POWER_PERIODIC);
                 break;
             default:
-                // IDLE空闲，不启动测量
                 break;
         }
         this._dataFetched = false;
@@ -187,28 +183,28 @@ class DFRobotSCD41 {
     softReset(): boolean {
         const ok = this.sendCmd(Cmd.SOFT_RESET);
         control.waitMicros(1000000);
-        this._currentMode = PeriodMode.IDLE;
+        this._currentMode = MODE_IDLE;
         return ok;
     }
 
     stopPeriodic(): boolean {
         const ok = this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
-        this._currentMode = PeriodMode.IDLE;
+        this._currentMode = MODE_IDLE;
         return ok;
     }
 
     startPeriodic(): boolean {
         const ok = this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
-        this._currentMode = PeriodMode.NORMAL_5S;
+        this._currentMode = MODE_NORMAL_5S;
         return ok;
     }
 
     startLowPowerPeriodic(): boolean {
         const ok = this.sendCmd(Cmd.START_LOW_POWER_PERIODIC);
         control.waitMicros(500000);
-        this._currentMode = PeriodMode.LOWPOWER_30S;
+        this._currentMode = MODE_LOWPOWER_30S;
         return ok;
     }
 
@@ -226,9 +222,9 @@ class DFRobotSCD41 {
         control.waitMicros(400000);
         const r = pins.i2cReadBuffer(SCD41_ADDR, 3, false);
         // FRC完成，恢复之前记录的周期模式
-        if(this._currentMode === PeriodMode.NORMAL_5S){
+        if(this._currentMode === MODE_NORMAL_5S){
             this.startPeriodic();
-        }else if(this._currentMode === PeriodMode.LOWPOWER_30S){
+        }else if(this._currentMode === MODE_LOWPOWER_30S){
             this.startLowPowerPeriodic();
         }
         if (r.length !== 3) return 0xFFFF;
