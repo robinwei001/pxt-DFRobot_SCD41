@@ -1,26 +1,13 @@
 /**
  * scd41Sensor.ts
- * 原有功能：I2C重试、看门狗自动复位、CO2/温湿度读取、就绪检测
- * 新增功能：软件复位、普通(5s)/低功耗(30s)周期切换、设置ASC自动校准、FRC强制校准
- * 改良：看门狗复位自动恢复故障前的周期模式；loc_block中文本地化
- * 修复：移除顶层enum，解决makecode无限转圈加载
+ * 功能:I2C重试、看门狗自动恢复周期、CO2温湿度读取
+ * 功能:软复位、普通5s/低功耗30s周期切换、ASC开关、FRC强制校准
+ * 修复:移除会导致makecode编译器死锁的特殊字符、顶层enum、readonly
  */
 const SCD41_ADDR = 0x62;
-// 不用enum，直接常量
 const MODE_IDLE = 0;
 const MODE_NORMAL_5S = 1;
 const MODE_LOWPOWER_30S = 2;
-
-enum Cmd {
-    STOP_PERIODIC_MEASUREMENT = 0x3F86,
-    START_PERIODIC_MEASUREMENT = 0x21B1,
-    START_LOW_POWER_PERIODIC = 0x21AC,
-    GET_DATA_READY_STATUS = 0xE4B8,
-    READ_MEASUREMENT = 0xEC05,
-    SOFT_RESET = 0x3646,
-    SET_AUTOMATIC_SELF_CALIBRATION = 0x2415,
-    FORCED_RECALIBRATION = 0x362F
-}
 
 function crc8(data: number[]): number {
     let crc = 0xFF;
@@ -39,14 +26,23 @@ function crc8(data: number[]): number {
 }
 
 class DFRobotSCD41 {
+    // 命令码全部移入类内部，消除顶层enum
+    private readonly STOP_PERIODIC_MEASUREMENT = 0x3F86;
+    private readonly START_PERIODIC_MEASUREMENT = 0x21B1;
+    private readonly START_LOW_POWER_PERIODIC = 0x21AC;
+    private readonly GET_DATA_READY_STATUS = 0xE4B8;
+    private readonly READ_MEASUREMENT = 0xEC05;
+    private readonly SOFT_RESET = 0x3646;
+    private readonly SET_AUTOMATIC_SELF_CALIBRATION = 0x2415;
+    private readonly FORCED_RECALIBRATION = 0x362F;
+
     private _initOK = false;
     private _co2 = 0;
     private _temp = 0.0;
     private _rh = 0.0;
     private _dataFetched = false;
     private _noDataCount = 0;
-    private readonly WATCHDOG_MAX = 10;
-    // 记录当前周期模式，改用数字常量
+    private WATCHDOG_MAX = 10; //去掉readonly
     private _currentMode: number = MODE_IDLE;
 
     constructor() { }
@@ -80,9 +76,9 @@ class DFRobotSCD41 {
     }
 
     init(): boolean {
-        this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
+        this.sendCmd(this.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
-        this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
+        this.sendCmd(this.START_PERIODIC_MEASUREMENT);
         this._currentMode = MODE_NORMAL_5S;
         this._initOK = true;
         this._dataFetched = false;
@@ -94,7 +90,7 @@ class DFRobotSCD41 {
         if (!this._initOK) return false;
         let ready = false;
         for (let retry = 0; retry < 3; retry++) {
-            this.sendCmd(Cmd.GET_DATA_READY_STATUS);
+            this.sendCmd(this.GET_DATA_READY_STATUS);
             const recv = pins.i2cReadBuffer(SCD41_ADDR, 3, false);
             if (recv.length >= 3) {
                 const c = crc8([recv[0], recv[1]]);
@@ -119,16 +115,15 @@ class DFRobotSCD41 {
         return ready;
     }
 
-    // 看门狗复位：根据 _currentMode 恢复对应周期模式
     private resetSensor() {
-        this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
+        this.sendCmd(this.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
         switch (this._currentMode) {
             case MODE_NORMAL_5S:
-                this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
+                this.sendCmd(this.START_PERIODIC_MEASUREMENT);
                 break;
             case MODE_LOWPOWER_30S:
-                this.sendCmd(Cmd.START_LOW_POWER_PERIODIC);
+                this.sendCmd(this.START_LOW_POWER_PERIODIC);
                 break;
             default:
                 break;
@@ -140,7 +135,7 @@ class DFRobotSCD41 {
         if (!this._initOK || this._dataFetched) {
             return;
         }
-        this.sendCmd(Cmd.READ_MEASUREMENT);
+        this.sendCmd(this.READ_MEASUREMENT);
         const recv = pins.i2cReadBuffer(SCD41_ADDR, 9, false);
         if (recv.length < 9) {
             this._co2 = 0;
@@ -181,28 +176,28 @@ class DFRobotSCD41 {
     }
 
     softReset(): boolean {
-        const ok = this.sendCmd(Cmd.SOFT_RESET);
+        const ok = this.sendCmd(this.SOFT_RESET);
         control.waitMicros(1000000);
         this._currentMode = MODE_IDLE;
         return ok;
     }
 
     stopPeriodic(): boolean {
-        const ok = this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
+        const ok = this.sendCmd(this.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
         this._currentMode = MODE_IDLE;
         return ok;
     }
 
     startPeriodic(): boolean {
-        const ok = this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
+        const ok = this.sendCmd(this.START_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
         this._currentMode = MODE_NORMAL_5S;
         return ok;
     }
 
     startLowPowerPeriodic(): boolean {
-        const ok = this.sendCmd(Cmd.START_LOW_POWER_PERIODIC);
+        const ok = this.sendCmd(this.START_LOW_POWER_PERIODIC);
         control.waitMicros(500000);
         this._currentMode = MODE_LOWPOWER_30S;
         return ok;
@@ -211,17 +206,16 @@ class DFRobotSCD41 {
     setASC(enable: boolean): boolean {
         this.stopPeriodic();
         const val = enable ? 1 : 0;
-        const ok = this.sendCmdWithParam(Cmd.SET_AUTOMATIC_SELF_CALIBRATION, val);
+        const ok = this.sendCmdWithParam(this.SET_AUTOMATIC_SELF_CALIBRATION, val);
         control.waitMicros(200000);
         return ok;
     }
 
     forcedRecalibration(refPpm: number): number {
         this.stopPeriodic();
-        this.sendCmdWithParam(Cmd.FORCED_RECALIBRATION, refPpm);
+        this.sendCmdWithParam(this.FORCED_RECALIBRATION, refPpm);
         control.waitMicros(400000);
         const r = pins.i2cReadBuffer(SCD41_ADDR, 3, false);
-        // FRC完成，恢复之前记录的周期模式
         if(this._currentMode === MODE_NORMAL_5S){
             this.startPeriodic();
         }else if(this._currentMode === MODE_LOWPOWER_30S){
@@ -280,12 +274,12 @@ namespace DFRobotSCD41 {
     export function startPeriodicMeasure() {
         scd41.startPeriodic();
     }
-    //% blockId="scd41_startlowpowerperiodic" block="start low‑power periodic"
+    //% blockId="scd41_startlowpowerperiodic" block="start low-power periodic"
     //% block.loc.zh-CN="SCD41 启动低功耗周期测量(30s)"
     export function startLowPowerPeriodicMeasure() {
         scd41.stopPeriodic();
     }
-    //% blockId="scd41_setasc" block="set ASC auto‑calibration %enable"
+    //% blockId="scd41_setasc" block="set ASC auto-calibration %enable"
     //% block.loc.zh-CN="SCD41 设置ASC自动校准 %enable"
     export function setASC(enable: boolean) {
         scd41.setASC(enable);
