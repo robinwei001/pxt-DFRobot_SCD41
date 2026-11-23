@@ -1,11 +1,8 @@
 /**
  * scd41Sensor.ts
- * 原有功能：I2C重试、看门狗自动复位、CO2/温湿度读取、就绪检测
- * 新增：普通周期5s / 低功耗周期30s切换；看门狗/FRC自动恢复当前测量模式
- * 规避bug：移除block.loc.zh‑CN，block直接写中文，避免makecode编译无限转圈
+ * 修复：方法名调用不匹配报错；保留5s/30s切换积木
  */
 const SCD41_ADDR = 0x62;
-// 模式常量（普通/低功耗/空闲）
 const MODE_IDLE = 0;
 const MODE_NORMAL_5S = 1;
 const MODE_LOWPOWER_30S = 2;
@@ -20,6 +17,7 @@ enum Cmd {
     SET_AUTOMATIC_SELF_CALIBRATION = 0x2415,
     FORCED_RECALIBRATION = 0x362F
 }
+
 function crc8(data: number[]): number {
     let crc = 0xFF;
     for (const b of data) {
@@ -35,6 +33,7 @@ function crc8(data: number[]): number {
     }
     return crc;
 }
+
 class DFRobotSCD41 {
     private _initOK = false;
     private _co2 = 0;
@@ -43,10 +42,10 @@ class DFRobotSCD41 {
     private _dataFetched = false;
     private _noDataCount = 0;
     private readonly WATCHDOG_MAX = 10;
-    //【新增】记录当前测量模式
     private _currentMode: number = MODE_IDLE;
 
     constructor() { }
+
     private sendCmd(cmd: number): boolean {
         const buf = pins.createBuffer(2);
         buf[0] = (cmd >> 8) & 0xFF;
@@ -59,6 +58,7 @@ class DFRobotSCD41 {
             return false;
         }
     }
+
     private sendCmdWithParam(cmd: number, value: number): boolean {
         const buf = pins.createBuffer(5);
         buf[0] = (cmd >> 8) & 0xFF;
@@ -73,6 +73,7 @@ class DFRobotSCD41 {
             return false;
         }
     }
+
     init(): boolean {
         this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
@@ -83,6 +84,7 @@ class DFRobotSCD41 {
         this._noDataCount = 0;
         return true;
     }
+
     isDataReady(): boolean {
         if (!this._initOK) return false;
         let ready = false;
@@ -111,7 +113,7 @@ class DFRobotSCD41 {
         }
         return ready;
     }
-    //【修改看门狗复位：恢复记录的模式，不再固定普通周期】
+
     private resetSensor() {
         this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
@@ -127,6 +129,7 @@ class DFRobotSCD41 {
         }
         this._dataFetched = false;
     }
+
     tryReadOnce() {
         if (!this._initOK || this._dataFetched) {
             return;
@@ -157,6 +160,7 @@ class DFRobotSCD41 {
         this._rh = rawRh * 100.0 / 65535.0;
         this._dataFetched = true;
     }
+
     getCO2(): number {
         this.tryReadOnce();
         return this._co2;
@@ -169,31 +173,35 @@ class DFRobotSCD41 {
         this.tryReadOnce();
         return this._rh;
     }
+
     softReset(): boolean {
         const ok = this.sendCmd(Cmd.SOFT_RESET);
         control.waitMicros(1000000);
         this._currentMode = MODE_IDLE;
         return ok;
     }
+
     stopPeriodic(): boolean {
         const ok = this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
         this._currentMode = MODE_IDLE;
         return ok;
     }
+
     startPeriodic(): boolean {
         const ok = this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
         this._currentMode = MODE_NORMAL_5S;
         return ok;
     }
-    //【新增底层：启动低功耗周期测量】
+
     startLowPowerPeriodic(): boolean {
         const ok = this.sendCmd(Cmd.START_LOW_POWER_PERIODIC);
         control.waitMicros(500000);
         this._currentMode = MODE_LOWPOWER_30S;
         return ok;
     }
+
     setASC(enable: boolean): boolean {
         this.stopPeriodic();
         const val = enable ? 1 : 0;
@@ -201,13 +209,12 @@ class DFRobotSCD41 {
         control.waitMicros(200000);
         return ok;
     }
-    //【修改FRC：校准结束恢复之前记录的周期模式，不再强制切普通5s】
+
     forcedRecalibration(refPpm: number): number {
         this.stopPeriodic();
         this.sendCmdWithParam(Cmd.FORCED_RECALIBRATION, refPpm);
         control.waitMicros(400000);
         const r = pins.i2cReadBuffer(SCD41_ADDR, 3, false);
-        //恢复之前模式
         if(this._currentMode === MODE_NORMAL_5S){
             this.startPeriodic();
         }else if(this._currentMode === MODE_LOWPOWER_30S){
@@ -219,31 +226,32 @@ class DFRobotSCD41 {
         return (r[0] << 8) | r[1];
     }
 }
+
 let scd41 = new DFRobotSCD41();
 
 //% weight=10 color="#0088cc" icon="\uf080"
 //% blockNamespace="DFRobotSCD41"
 //% block="DFRobot SCD41 二氧化碳传感器"
 namespace DFRobotSCD41 {
-    //【全部block直接写中文，删除所有 block.loc.zh‑CN，规避编译卡死】
     //% blockId="scd41_init" block="初始化 SCD41 传感器"
     export function initSensor() {
         scd41.init();
     }
+    // ✅ 修复：调用isDataReady()
     //% blockId="scd41_isready" block="SCD41 是否数据就绪？"
     export function isReady(): boolean {
-        return scd41.isReady();
+        return scd41.isDataReady();
     }
     //% blockId="scd41_readco2" block="读取二氧化碳 ppm"
     export function getCO2(): number {
         return scd41.getCO2();
     }
     //% blockId="scd41_readtemp" block="读取温度 ℃"
-    export function getTemp(): number {
+    export function getTemp() {
         return scd41.getTemperature();
     }
     //% blockId="scd41_readhum" block="读取湿度 %RH"
-    export function getHum(): number {
+    export function getHum() {
         return scd41.getHumidity();
     }
     //% blockId="scd41_softreset" block="SCD41 软件复位"
@@ -254,22 +262,21 @@ namespace DFRobotSCD41 {
     export function stopPeriodicMeasure() {
         scd41.stopPeriodic();
     }
-    //【原有启动周期，改中文显示为普通5s】
-    //% blockId="scd41_startperiodic" block="SCD41 启动普通周期测量(5s)"
-    export function startPeriodicMeasure() {
+    //% blockId="scd41_start_normal_5s" block="SCD41 启动普通周期测量(5s)"
+    export function startNormalPeriodicMeasure() {
         scd41.startPeriodic();
     }
-    //【新增图形积木：低功耗30s】
-    //% blockId="scd41_startlowpowerperiodic" block="SCD41 启动低功耗周期测量(30s)"
+    //% blockId="scd41_start_lowpower_30s" block="SCD41 启动低功耗周期测量(30s)"
     export function startLowPowerPeriodicMeasure() {
-        scd41.stopPeriodic();
+        scd41.startLowPowerPeriodic();
     }
     //% blockId="scd41_setasc" block="SCD41 设置ASC自动校准 %enable"
     export function setASC(enable: boolean) {
         scd41.setASC(enable);
     }
+    // ✅ 修复：调用forcedRecalibration()
     //% blockId="scd41_frc" block="SCD41 FRC强制校准 参考ppm %refPpm"
     export function frcCal(refPpm: number): number {
-        return scd41.frcCal(refPpm);
+        return scd41.forcedRecalibration(refPpm);
     }
 }
