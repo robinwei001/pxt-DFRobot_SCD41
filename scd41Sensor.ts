@@ -3,19 +3,19 @@
  * 原有功能：I2C重试、看门狗自动复位、CO2/温湿度读取、就绪检测
  * 新增功能：软件复位、启动/停止周期测量、设置ASC自动校准、FRC强制校准
  * 使用loc_block本地化，确保图形块显示中文
+ * 追加：普通周期(5s) / 低功耗周期(30s) 模式切换积木，原有逻辑完全保留
  */
 const SCD41_ADDR = 0x62;
-
 enum Cmd {
     STOP_PERIODIC_MEASUREMENT = 0x3F86,
     START_PERIODIC_MEASUREMENT = 0x21B1,
+    START_LOW_POWER_PERIODIC = 0x21AC,
     GET_DATA_READY_STATUS = 0xE4B8,
     READ_MEASUREMENT = 0xEC05,
     SOFT_RESET = 0x3646,
     SET_AUTOMATIC_SELF_CALIBRATION = 0x2415,
     FORCED_RECALIBRATION = 0x362F
 }
-
 function crc8(data: number[]): number {
     let crc = 0xFF;
     for (const b of data) {
@@ -31,7 +31,6 @@ function crc8(data: number[]): number {
     }
     return crc;
 }
-
 class DFRobotSCD41 {
     private _initOK = false;
     private _co2 = 0;
@@ -40,9 +39,7 @@ class DFRobotSCD41 {
     private _dataFetched = false;
     private _noDataCount = 0;
     private readonly WATCHDOG_MAX = 10;
-
     constructor() { }
-
     private sendCmd(cmd: number): boolean {
         const buf = pins.createBuffer(2);
         buf[0] = (cmd >> 8) & 0xFF;
@@ -55,7 +52,6 @@ class DFRobotSCD41 {
             return false;
         }
     }
-
     private sendCmdWithParam(cmd: number, value: number): boolean {
         const buf = pins.createBuffer(5);
         buf[0] = (cmd >> 8) & 0xFF;
@@ -70,7 +66,6 @@ class DFRobotSCD41 {
             return false;
         }
     }
-
     init(): boolean {
         this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
@@ -80,7 +75,6 @@ class DFRobotSCD41 {
         this._noDataCount = 0;
         return true;
     }
-
     isDataReady(): boolean {
         if (!this._initOK) return false;
         let ready = false;
@@ -109,14 +103,12 @@ class DFRobotSCD41 {
         }
         return ready;
     }
-
     private resetSensor() {
         this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
         this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
         this._dataFetched = false;
     }
-
     tryReadOnce() {
         if (!this._initOK || this._dataFetched) {
             return;
@@ -147,7 +139,6 @@ class DFRobotSCD41 {
         this._rh = rawRh * 100.0 / 65535.0;
         this._dataFetched = true;
     }
-
     getCO2(): number {
         this.tryReadOnce();
         return this._co2;
@@ -160,7 +151,6 @@ class DFRobotSCD41 {
         this.tryReadOnce();
         return this._rh;
     }
-
     softReset(): boolean {
         const ok = this.sendCmd(Cmd.SOFT_RESET);
         control.waitMicros(1000000);
@@ -173,6 +163,12 @@ class DFRobotSCD41 {
     }
     startPeriodic(): boolean {
         const ok = this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
+        control.waitMicros(500000);
+        return ok;
+    }
+    // 新增：启动低功耗周期测量（30s）
+    startLowPowerPeriodic(): boolean {
+        const ok = this.sendCmd(Cmd.START_LOW_POWER_PERIODIC);
         control.waitMicros(500000);
         return ok;
     }
@@ -195,60 +191,57 @@ class DFRobotSCD41 {
         return (r[0] << 8) | r[1];
     }
 }
-
 let scd41 = new DFRobotSCD41();
-
 //% weight=10 color="#0088cc" icon="\uf080"
 //% blockNamespace="DFRobotSCD41"
 //% block.loc.zh-CN="DFRobot SCD41 二氧化碳传感器"
 namespace DFRobotSCD41 {
-
     //% blockId="scd41_init" block="init sensor"
     //% block.loc.zh-CN="初始化 SCD41 传感器"
     export function initSensor() {
         scd41.init();
     }
-
     //% blockId="scd41_isready" block="data ready?"
     //% block.loc.zh-CN="SCD41 是否数据就绪？"
     export function isReady(): boolean {
-        return scd41.isDataReady();
+        return scd41.isReady();
     }
-
     //% blockId="scd41_readco2" block="read CO2 ppm"
     //% block.loc.zh-CN="读取二氧化碳 ppm"
     export function getCO2(): number {
         return scd41.getCO2();
     }
-
     //% blockId="scd41_readtemp" block="read temperature ℃"
     //% block.loc.zh-CN="读取温度 ℃"
-    export function getTemp(): number {
+    export function getTemp() {
         return scd41.getTemperature();
     }
-
     //% blockId="scd41_readhum" block="read humidity %RH"
     //% block.loc.zh-CN="读取湿度 %RH"
-    export function getHum(): number {
+    export function getHum() {
         return scd41.getHumidity();
     }
-
     //% blockId="scd41_softreset" block="soft reset"
     //% block.loc.zh-CN="SCD41 软件复位"
     export function softReset() {
         scd41.softReset();
     }
-
     //% blockId="scd41_stopperiodic" block="stop periodic measurement"
     //% block.loc.zh-CN="SCD41 停止周期测量"
     export function stopPeriodicMeasure() {
         scd41.stopPeriodic();
     }
-
     //% blockId="scd41_startperiodic" block="start periodic measurement"
-    //% block.loc.zh-CN="SCD41 启动周期测量"
+    //% block.loc.zh-CN="SCD41 启动普通周期测量(5s)"
     export function startPeriodicMeasure() {
         scd41.startPeriodic();
+    }
+    //===== 新增：低功耗周期图形积木 =====
+    //% blockId="scd41_startlowpowerperiodic" block="start low‑power periodic"
+    //% block.loc.zh-CN="SCD41 启动低功耗周期测量(30s)"
+    export function startLowPowerPeriodicMeasure() {
+        scd41.stopPeriodic();
+        scd41.startLowPowerPeriodic();
     }
 
     //% blockId="scd41_setasc" block="set ASC auto‑calibration %enable"
@@ -256,7 +249,6 @@ namespace DFRobotSCD41 {
     export function setASC(enable: boolean) {
         scd41.setASC(enable);
     }
-
     //% blockId="scd41_frc" block="FRC forced recalibration ref ppm %refPpm"
     //% block.loc.zh-CN="SCD41 FRC强制校准 参考ppm %refPpm"
     export function frcCal(refPpm: number): number {
