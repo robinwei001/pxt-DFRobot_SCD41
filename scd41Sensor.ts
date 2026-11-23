@@ -1,14 +1,19 @@
 /**
  * scd41Sensor.ts
- * 增加I2C重试 + 看门狗自动复位，兼容原有全部积木
- * 解决：查询几次后I2C卡死不再刷新
+ * 原有功能：I2C重试、看门狗自动复位、CO2/温湿度读取、就绪检测
+ * 新增功能：软件复位、启动/停止周期测量、设置ASC自动校准、FRC强制校准
+ * 使用loc_block本地化，确保图形块显示中文
  */
 const SCD41_ADDR = 0x62;
+
 enum Cmd {
     STOP_PERIODIC_MEASUREMENT = 0x3F86,
     START_PERIODIC_MEASUREMENT = 0x21B1,
     GET_DATA_READY_STATUS = 0xE4B8,
-    READ_MEASUREMENT = 0xEC05
+    READ_MEASUREMENT = 0xEC05,
+    SOFT_RESET = 0x3646,
+    SET_AUTOMATIC_SELF_CALIBRATION = 0x2415,
+    FORCED_RECALIBRATION = 0x362F
 }
 
 function crc8(data: number[]): number {
@@ -34,7 +39,6 @@ class DFRobotSCD41 {
     private _rh = 0.0;
     private _dataFetched = false;
     private _noDataCount = 0;
-    // 连续10次查不到就绪，自动复位传感器
     private readonly WATCHDOG_MAX = 10;
 
     constructor() { }
@@ -52,6 +56,21 @@ class DFRobotSCD41 {
         }
     }
 
+    private sendCmdWithParam(cmd: number, value: number): boolean {
+        const buf = pins.createBuffer(5);
+        buf[0] = (cmd >> 8) & 0xFF;
+        buf[1] = cmd & 0xFF;
+        buf[2] = (value >> 8) & 0xFF;
+        buf[3] = value & 0xFF;
+        buf[4] = crc8([buf[2], buf[3]]);
+        try {
+            pins.i2cWriteBuffer(SCD41_ADDR, buf, false);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     init(): boolean {
         this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
         control.waitMicros(500000);
@@ -62,12 +81,9 @@ class DFRobotSCD41 {
         return true;
     }
 
-    // 带重试的就绪查询
     isDataReady(): boolean {
         if (!this._initOK) return false;
-
         let ready = false;
-        // 最多重试2次
         for (let retry = 0; retry < 3; retry++) {
             this.sendCmd(Cmd.GET_DATA_READY_STATUS);
             const recv = pins.i2cReadBuffer(SCD41_ADDR, 3, false);
@@ -81,13 +97,11 @@ class DFRobotSCD41 {
             }
             control.waitMicros(500);
         }
-
         if (ready) {
             this._dataFetched = false;
             this._noDataCount = 0;
         } else {
             this._noDataCount += 1;
-            // 看门狗：长期无数据，自动重启测量
             if (this._noDataCount >= this.WATCHDOG_MAX) {
                 this.resetSensor();
                 this._noDataCount = 0;
@@ -103,7 +117,7 @@ class DFRobotSCD41 {
         this._dataFetched = false;
     }
 
-    private tryReadOnce() {
+    tryReadOnce() {
         if (!this._initOK || this._dataFetched) {
             return;
         }
@@ -146,31 +160,106 @@ class DFRobotSCD41 {
         this.tryReadOnce();
         return this._rh;
     }
+
+    softReset(): boolean {
+        const ok = this.sendCmd(Cmd.SOFT_RESET);
+        control.waitMicros(1000000);
+        return ok;
+    }
+    stopPeriodic(): boolean {
+        const ok = this.sendCmd(Cmd.STOP_PERIODIC_MEASUREMENT);
+        control.waitMicros(500000);
+        return ok;
+    }
+    startPeriodic(): boolean {
+        const ok = this.sendCmd(Cmd.START_PERIODIC_MEASUREMENT);
+        control.waitMicros(500000);
+        return ok;
+    }
+    setASC(enable: boolean): boolean {
+        this.stopPeriodic();
+        const val = enable ? 1 : 0;
+        const ok = this.sendCmdWithParam(Cmd.SET_AUTOMATIC_SELF_CALIBRATION, val);
+        control.waitMicros(200000);
+        return ok;
+    }
+    forcedRecalibration(refPpm: number): number {
+        this.stopPeriodic();
+        this.sendCmdWithParam(Cmd.FORCED_RECALIBRATION, refPpm);
+        control.waitMicros(400000);
+        const r = pins.i2cReadBuffer(SCD41_ADDR, 3, false);
+        this.startPeriodic();
+        if (r.length !== 3) return 0xFFFF;
+        const check = crc8([r[0], r[1]]);
+        if (check !== r[2]) return 0xFFFF;
+        return (r[0] << 8) | r[1];
+    }
 }
 
 let scd41 = new DFRobotSCD41();
 
 //% weight=10 color="#0088cc" icon="\uf080"
-//% block="DFRobot SCD41 CO2 Sensor"
+//% blockNamespace="DFRobotSCD41"
+//% block.loc.zh-CN="DFRobot SCD41 二氧化碳传感器"
 namespace DFRobotSCD41 {
-    //% block="init SCD41 sensor"
+
+    //% blockId="scd41_init" block="init sensor"
+    //% block.loc.zh-CN="初始化 SCD41 传感器"
     export function initSensor() {
         scd41.init();
     }
-    //% block="SCD41 data ready?"
+
+    //% blockId="scd41_isready" block="data ready?"
+    //% block.loc.zh-CN="SCD41 是否数据就绪？"
     export function isReady(): boolean {
         return scd41.isDataReady();
     }
-    //% block="SCD41 read CO2 ppm"
+
+    //% blockId="scd41_readco2" block="read CO2 ppm"
+    //% block.loc.zh-CN="读取二氧化碳 ppm"
     export function getCO2(): number {
         return scd41.getCO2();
     }
-    //% block="SCD41 read temperature ℃"
+
+    //% blockId="scd41_readtemp" block="read temperature ℃"
+    //% block.loc.zh-CN="读取温度 ℃"
     export function getTemp(): number {
         return scd41.getTemperature();
     }
-    //% block="SCD41 read humidity %"
+
+    //% blockId="scd41_readhum" block="read humidity %RH"
+    //% block.loc.zh-CN="读取湿度 %RH"
     export function getHum(): number {
         return scd41.getHumidity();
+    }
+
+    //% blockId="scd41_softreset" block="soft reset"
+    //% block.loc.zh-CN="SCD41 软件复位"
+    export function softReset() {
+        scd41.softReset();
+    }
+
+    //% blockId="scd41_stopperiodic" block="stop periodic measurement"
+    //% block.loc.zh-CN="SCD41 停止周期测量"
+    export function stopPeriodicMeasure() {
+        scd41.stopPeriodic();
+    }
+
+    //% blockId="scd41_startperiodic" block="start periodic measurement"
+    //% block.loc.zh-CN="SCD41 启动周期测量"
+    export function startPeriodicMeasure() {
+        scd41.startPeriodic();
+    }
+
+    //% blockId="scd41_setasc" block="set ASC auto‑calibration %enable"
+    //% block.loc.zh-CN="SCD41 设置ASC自动校准 %enable"
+    export function setASC(enable: boolean) {
+        scd41.setASC(enable);
+    }
+
+    //% blockId="scd41_frc" block="FRC forced recalibration ref ppm %refPpm"
+    //% block.loc.zh-CN="SCD41 FRC强制校准 参考ppm %refPpm"
+    export function frcCal(refPpm: number): number {
+        return scd41.forcedRecalibration(refPpm);
     }
 }
